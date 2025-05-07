@@ -20,17 +20,23 @@ BRANCH = "main"
 CATEGORIES = ['Gammes operatoires', 'Procedures maintenance', 'REX']
 
 def get_file_url(file_path):
-    """Retourne l'URL optimale pour accéder au fichier (gère LFS automatiquement)"""
-    return f"https://media.githubusercontent.com/media/{GITHUB_OWNER}/{REPO_NAME}/{BRANCH}/{quote(file_path)}"
+    """Retourne l'URL raw pour accéder au fichier"""
+    return f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{REPO_NAME}/{BRANCH}/{quote(file_path)}"
 
 def get_directory_contents(path):
     """Récupère le contenu d'un dossier via l'API GitHub"""
     api_url = f"https://api.github.com/repos/{GITHUB_OWNER}/{REPO_NAME}/contents/{quote(path)}?ref={BRANCH}"
-    response = requests.get(api_url)
+    headers = {}
+    
+    if os.getenv('GITHUB_TOKEN'):
+        headers['Authorization'] = f"token {os.getenv('GITHUB_TOKEN')}"
+    
+    response = requests.get(api_url, headers=headers)
     
     if response.status_code == 200:
         return response.json()
-    print(f"Erreur {response.status_code} pour {path}: {response.text}")
+    
+    app.logger.error(f"Erreur {response.status_code} pour {path}: {response.text}")
     return None
 
 def lister_fichiers_recursivement(chemin):
@@ -133,10 +139,16 @@ def rechercher_documents(term):
 @login_required
 def view_file(file_path):
     """Affiche le fichier directement dans le navigateur"""
+    # Protection contre les attaques par traversal
+    if '..' in file_path or file_path.startswith('/'):
+        flash("Chemin de fichier non autorisé", 'error')
+        return redirect(url_for('index'))
+
     content_url = get_file_url(file_path)
+    filename = os.path.basename(file_path)
     
     # Détermination du type MIME
-    file_ext = os.path.splitext(file_path)[1].lower()
+    file_ext = os.path.splitext(filename)[1].lower()
     mime_types = {
         '.pdf': 'application/pdf',
         '.doc': 'application/msword',
@@ -146,26 +158,28 @@ def view_file(file_path):
         '.png': 'image/png'
     }
     mimetype = mime_types.get(file_ext, 'application/octet-stream')
-    
-    # Solution optimisée avec streaming
+
     try:
-        req = requests.get(content_url, stream=True)
-        if req.status_code == 200:
+        # Timeout après 10 secondes
+        response = requests.get(content_url, stream=True, timeout=10)
+        
+        if response.status_code == 200:
             return Response(
-                req.iter_content(chunk_size=1024),
+                response.iter_content(chunk_size=1024),
                 mimetype=mimetype,
                 headers={
-                    'Content-Disposition': f'inline; filename="{os.path.basename(file_path)}"',
-                    'X-Content-Type-Options': 'nosniff',
-                    'Cache-Control': 'public, max-age=3600'
+                    'Content-Disposition': f'inline; filename="{filename}"',
+                    'X-Content-Type-Options': 'nosniff'
                 }
             )
         else:
-            flash("Le fichier n'a pas pu être chargé", 'error')
-            return redirect(url_for('index'))
-    except Exception as e:
-        flash(f"Erreur lors de l'accès au fichier: {str(e)}", 'error')
-        return redirect(url_for('index'))
+            app.logger.error(f"Erreur {response.status_code} pour {content_url}")
+            flash(f"Le fichier n'a pas pu être chargé (erreur {response.status_code})", 'error')
+    except requests.exceptions.RequestException as e:
+        app.logger.error(f"Erreur de connexion pour {content_url}: {str(e)}")
+        flash("Erreur de connexion au serveur GitHub", 'error')
+    
+    return redirect(url_for('index'))
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
