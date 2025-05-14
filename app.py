@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from urllib.parse import quote
 from werkzeug.security import generate_password_hash, check_password_hash
 
+# Chargement des variables d'environnement
 load_dotenv()
 
 app = Flask(__name__)
@@ -19,44 +20,14 @@ BRANCH = "main"
 # Dossiers à explorer
 CATEGORIES = ['Gammes operatoires', 'Procedures maintenance', 'REX']
 
-def get_file_url(file_path):
-    """Retourne l'URL raw pour accéder au fichier"""
-    return f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{REPO_NAME}/{BRANCH}/{quote(file_path)}"
+# Extensions autorisées
+EXTENSIONS_AUTORISEES = ['.pdf', '.doc', '.docx', '.jpg', '.jpeg', '.png']
 
-def get_directory_contents(path):
-    """Récupère le contenu d'un dossier via l'API GitHub"""
-    api_url = f"https://api.github.com/repos/{GITHUB_OWNER}/{REPO_NAME}/contents/{quote(path)}?ref={BRANCH}"
-    headers = {}
-    
-    if os.getenv('GITHUB_TOKEN'):
-        headers['Authorization'] = f"token {os.getenv('GITHUB_TOKEN')}"
-    
-    response = requests.get(api_url, headers=headers)
-    
-    if response.status_code == 200:
-        return response.json()
-    
-    app.logger.error(f"Erreur {response.status_code} pour {path}: {response.text}")
-    return None
-
-def lister_fichiers_recursivement(chemin):
-    """Liste récursive des fichiers PDF/DOC"""
-    fichiers = []
-    contents = get_directory_contents(chemin)
-    
-    if contents:
-        for item in contents:
-            if item['type'] == 'file':
-                if item['name'].lower().endswith(('.pdf', '.doc', '.docx', '.jpg', '.jpeg', '.png')):
-                    fichiers.append({
-                        "name": item['name'],
-                        "download_url": get_file_url(item['path']),
-                        "path": item['path'],
-                        "category": chemin.split('/')[0] if '/' in chemin else chemin
-                    })
-            elif item['type'] == 'dir':
-                fichiers.extend(lister_fichiers_recursivement(item['path']))
-    return fichiers
+# Gestion des utilisateurs (nom d'utilisateur : mot de passe hashé)
+USERS = {
+    "admin": generate_password_hash("admin123"),
+    "technicien": generate_password_hash("tech123")
+}
 
 # Configuration Flask-Login
 login_manager = LoginManager()
@@ -68,32 +39,64 @@ class User(UserMixin):
 
 @login_manager.user_loader
 def user_loader(username):
-    users = {
-        "admin": {"password": generate_password_hash("admin123")},
-        "technicien": {"password": generate_password_hash("tech123")}
-    }
-    if username not in users:
+    if username not in USERS:
         return None
     user = User()
     user.id = username
     return user
+
+def get_file_url(file_path):
+    """Retourne l'URL raw pour accéder au fichier sur GitHub"""
+    return f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{REPO_NAME}/{BRANCH}/{quote(file_path)}"
+
+def get_directory_contents(path):
+    """Récupère le contenu d'un dossier via l’API GitHub"""
+    api_url = f"https://api.github.com/repos/{GITHUB_OWNER}/{REPO_NAME}/contents/{quote(path)}?ref={BRANCH}"
+    headers = {}
+
+    if os.getenv('GITHUB_TOKEN'):
+        headers['Authorization'] = f"token {os.getenv('GITHUB_TOKEN')}"
+
+    response = requests.get(api_url, headers=headers)
+
+    if response.status_code == 200:
+        return response.json()
+
+    app.logger.error(f"Erreur {response.status_code} pour {path}: {response.text}")
+    return None
+
+def lister_fichiers_recursivement(chemin):
+    """Liste récursivement tous les fichiers PDF/DOC/... dans un dossier GitHub"""
+    fichiers = []
+    contents = get_directory_contents(chemin)
+
+    if contents:
+        for item in contents:
+            if item['type'] == 'file':
+                ext = os.path.splitext(item['name'])[1].lower()
+                if ext in EXTENSIONS_AUTORISEES:
+                    fichiers.append({
+                        "name": item['name'],
+                        "download_url": get_file_url(item['path']),
+                        "path": item['path'],
+                        "category": chemin.split('/')[0] if '/' in chemin else chemin
+                    })
+            elif item['type'] == 'dir':
+                fichiers.extend(lister_fichiers_recursivement(item['path']))
+    return fichiers
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
         username = request.form.get('username')
         password = request.form.get('password')
-        users = {
-            "admin": {"password": generate_password_hash("admin123")},
-            "technicien": {"password": generate_password_hash("tech123")}
-        }
-        
-        if username in users and check_password_hash(users[username]['password'], password):
+
+        if username in USERS and check_password_hash(USERS[username], password):
             user = User()
             user.id = username
             login_user(user)
             return redirect(url_for('index'))
-        
+
         flash('Identifiant ou mot de passe incorrect', 'error')
     return render_template('login.html')
 
@@ -109,7 +112,7 @@ def index():
     results = []
     message = ""
     search_term = ""
-    
+
     if request.method == 'POST':
         search_term = request.form.get('search', '').strip()
         if not search_term:
@@ -118,15 +121,15 @@ def index():
             results = rechercher_documents(search_term)
             if not results:
                 message = "Aucun document trouvé pour cette recherche."
-    
-    return render_template('index.html', 
-                         results=results, 
-                         message=message, 
-                         search_term=search_term,
-                         current_user=current_user)
+
+    return render_template('index.html',
+                           results=results,
+                           message=message,
+                           search_term=search_term,
+                           current_user=current_user)
 
 def rechercher_documents(term):
-    """Recherche insensible à la casse"""
+    """Recherche insensible à la casse dans tous les fichiers des catégories"""
     results = []
     for dossier in CATEGORIES:
         fichiers = lister_fichiers_recursivement(dossier)
@@ -138,17 +141,16 @@ def rechercher_documents(term):
 @app.route('/view/<path:file_path>')
 @login_required
 def view_file(file_path):
-    """Affiche le fichier directement dans le navigateur"""
-    # Protection contre les attaques par traversal
+    """Affiche le fichier dans le navigateur"""
+    # Sécurité : empêche les attaques path traversal
     if '..' in file_path or file_path.startswith('/'):
         flash("Chemin de fichier non autorisé", 'error')
         return redirect(url_for('index'))
 
     content_url = get_file_url(file_path)
     filename = os.path.basename(file_path)
-    
-    # Détermination du type MIME
-    file_ext = os.path.splitext(filename)[1].lower()
+    ext = os.path.splitext(filename)[1].lower()
+
     mime_types = {
         '.pdf': 'application/pdf',
         '.doc': 'application/msword',
@@ -157,12 +159,11 @@ def view_file(file_path):
         '.jpeg': 'image/jpeg',
         '.png': 'image/png'
     }
-    mimetype = mime_types.get(file_ext, 'application/octet-stream')
+    mimetype = mime_types.get(ext, 'application/octet-stream')
 
     try:
-        # Timeout après 10 secondes
         response = requests.get(content_url, stream=True, timeout=10)
-        
+
         if response.status_code == 200:
             return Response(
                 response.iter_content(chunk_size=1024),
@@ -178,7 +179,7 @@ def view_file(file_path):
     except requests.exceptions.RequestException as e:
         app.logger.error(f"Erreur de connexion pour {content_url}: {str(e)}")
         flash("Erreur de connexion au serveur GitHub", 'error')
-    
+
     return redirect(url_for('index'))
 
 if __name__ == '__main__':
